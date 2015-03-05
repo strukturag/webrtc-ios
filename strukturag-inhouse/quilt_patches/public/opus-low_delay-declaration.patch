@@ -1,0 +1,61 @@
+Description: Added declaration of low delay Opus application mode.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/webrtc/modules/audio_coding/codecs/opus/interface/audio_encoder_opus.h
+===================================================================
+--- src.orig/webrtc/modules/audio_coding/codecs/opus/interface/audio_encoder_opus.h
++++ src/webrtc/modules/audio_coding/codecs/opus/interface/audio_encoder_opus.h
+@@ -23,6 +23,7 @@ class AudioEncoderOpus : public AudioEnc
+   enum ApplicationMode {
+     kVoip = 0,
+     kAudio = 1,
++    kLowDelay = 2,
+   };
+ 
+   struct Config {
+Index: src/webrtc/modules/audio_coding/codecs/opus/interface/opus_interface.h
+===================================================================
+--- src.orig/webrtc/modules/audio_coding/codecs/opus/interface/opus_interface.h
++++ src/webrtc/modules/audio_coding/codecs/opus/interface/opus_interface.h
+@@ -32,6 +32,9 @@ typedef struct WebRtcOpusDecInst OpusDec
+  *                                 Favor speech intelligibility.
+  *                             1 - Audio applications.
+  *                                 Favor faithfulness to the original input.
++ *                             2 - Restricted low delay.
++ *                                 Slightly worse speech quality in favor of
++ *                                 low delay. Forces CELT.
+  *
+  * Output:
+  *      - inst               : a pointer to Encoder context that is created
+Index: src/webrtc/modules/audio_coding/codecs/opus/opus_interface.c
+===================================================================
+--- src.orig/webrtc/modules/audio_coding/codecs/opus/opus_interface.c
++++ src/webrtc/modules/audio_coding/codecs/opus/opus_interface.c
+@@ -48,6 +48,10 @@ int16_t WebRtcOpus_EncoderCreate(OpusEnc
+           opus_app = OPUS_APPLICATION_AUDIO;
+           break;
+         }
++        case 2: {
++          opus_app = OPUS_APPLICATION_RESTRICTED_LOWDELAY;
++          break;
++        }
+         default: {
+           free(state);
+           return -1;
+Index: src/webrtc/modules/audio_coding/main/interface/audio_coding_module_typedefs.h
+===================================================================
+--- src.orig/webrtc/modules/audio_coding/main/interface/audio_coding_module_typedefs.h
++++ src/webrtc/modules/audio_coding/main/interface/audio_coding_module_typedefs.h
+@@ -206,10 +206,12 @@ enum ACMBackgroundNoiseMode {
+ //
+ // kVoip              : optimized for voice signals.
+ // kAudio             : optimized for non-voice signals like music.
++// kLowDelay          : optimized for low delay. Forces CELT.
+ //
+ enum OpusApplicationMode {
+  kVoip = 0,
+  kAudio = 1,
++ kLowDelay = 2,
+ };
+ 
+ }  // namespace webrtc

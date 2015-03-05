@@ -1,0 +1,15 @@
+Description: Fix crashes in openGL due to incompatible default memory alignment.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/webrtc/modules/video_render/ios/open_gles20.mm
+===================================================================
+--- src.orig/webrtc/modules/video_render/ios/open_gles20.mm
++++ src/webrtc/modules/video_render/ios/open_gles20.mm
+@@ -249,6 +249,7 @@ static void InitializeTexture(int name, 
+   glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+   glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+   glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+   glTexImage2D(GL_TEXTURE_2D,
+                0,
+                GL_LUMINANCE,

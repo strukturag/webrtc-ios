@@ -1,0 +1,26 @@
+Description: Use clang from Xcode even with ninja builds. \
+  Explicitely set iOS deployment target to iOS6.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/build/common.gypi
+===================================================================
+--- src.orig/build/common.gypi
++++ src/build/common.gypi
+@@ -1301,7 +1301,7 @@
+     # '1', uses the version of clang that ships with Xcode.  If set to '0', uses
+     # the version of clang that ships with the Chromium source.  This variable
+     # is automatically set to '1' when using the Xcode generator.
+-    'clang_xcode%': 0,
++    'clang_xcode%': 1,
+ 
+     # These two variables can be set in GYP_DEFINES while running
+     # |gclient runhooks| to let clang run a plugin in every compilation.
+@@ -1629,7 +1629,7 @@
+         # not using the "current" SDK.
+         'ios_sdk%': '',
+         'ios_sdk_path%': '',
+-        'ios_deployment_target%': '7.0',
++        'ios_deployment_target%': '6.0',
+ 
+         'conditions': [
+           # ios_product_name is set to the name of the .app bundle as it should

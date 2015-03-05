@@ -1,0 +1,186 @@
+Description: Fixed data races in video renderer for iOS. \
+  Added additional cleanup of EAGLContext in dealloc. \
+  Added proper resizing when view size changes.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/webrtc/modules/video_render/ios/video_render_ios_view.mm
+===================================================================
+--- src.orig/webrtc/modules/video_render/ios/video_render_ios_view.mm
++++ src/webrtc/modules/video_render/ios/video_render_ios_view.mm
+@@ -14,19 +14,24 @@
+ 
+ #include "webrtc/modules/video_render/ios/video_render_ios_view.h"
+ #include "webrtc/system_wrappers/interface/trace.h"
++#include "webrtc/system_wrappers/interface/critical_section_wrapper.h"
+ 
+ using namespace webrtc;
+ 
+-@implementation VideoRenderIosView {
++@implementation VideoRenderIosView
++{
++  CriticalSectionWrapper *_critSection;
+   EAGLContext* _context;
+   webrtc::scoped_ptr<webrtc::OpenGles20> _gles_renderer20;
+   int _frameBufferWidth;
+   int _frameBufferHeight;
+   unsigned int _defaultFrameBuffer;
+   unsigned int _colorRenderBuffer;
++
++  int _layoutRetries;
+ }
+ 
+-@synthesize context = context_;
++@synthesize context = _context;
+ 
+ + (Class)layerClass {
+   return [CAEAGLLayer class];
+@@ -36,6 +41,7 @@ using namespace webrtc;
+   // init super class
+   self = [super initWithCoder:coder];
+   if (self) {
++    _critSection = webrtc::CriticalSectionWrapper::CreateCriticalSection();
+     _gles_renderer20.reset(new OpenGles20());
+   }
+   return self;
+@@ -45,6 +51,7 @@ using namespace webrtc;
+   // init super class
+   self = [super init];
+   if (self) {
++    _critSection = webrtc::CriticalSectionWrapper::CreateCriticalSection();
+     _gles_renderer20.reset(new OpenGles20());
+   }
+   return self;
+@@ -54,12 +61,17 @@ using namespace webrtc;
+   // init super class
+   self = [super initWithFrame:frame];
+   if (self) {
++    _critSection = webrtc::CriticalSectionWrapper::CreateCriticalSection();
+     _gles_renderer20.reset(new OpenGles20());
+   }
+   return self;
+ }
+ 
+ - (void)dealloc {
++  _critSection->Enter();
++  [EAGLContext setCurrentContext:nil]; // Without this call view shows nothing sometimes.
++  _critSection->Leave();
++
+   if (_defaultFrameBuffer) {
+     glDeleteFramebuffers(1, &_defaultFrameBuffer);
+     _defaultFrameBuffer = 0;
+@@ -70,16 +82,13 @@ using namespace webrtc;
+     _colorRenderBuffer = 0;
+   }
+ 
+-  [EAGLContext setCurrentContext:nil];
+-}
+-
+-- (NSString*)description {
+-  return [NSString stringWithFormat:
+-          @"A WebRTC implemented subclass of UIView."
+-          "+Class method is overwritten, along with custom methods"];
++  delete _critSection;
+ }
+ 
+ - (BOOL)createContext {
++
++  _critSection->Enter();
++
+   // create OpenGLES context from self layer class
+   CAEAGLLayer* eagl_layer = (CAEAGLLayer*)self.layer;
+   eagl_layer.opaque = YES;
+@@ -91,11 +100,15 @@ using namespace webrtc;
+           nil];
+   _context = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];
+ 
++
+   if (!_context) {
++    _critSection->Leave();
+     return NO;
+   }
+ 
++  // set current EAGLContext to self context_
+   if (![EAGLContext setCurrentContext:_context]) {
++    _critSection->Leave();
+     return NO;
+   }
+ 
+@@ -118,6 +131,7 @@ using namespace webrtc;
+                             _colorRenderBuffer);
+ 
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
++    _critSection->Leave();
+     return NO;
+   }
+ 
+@@ -125,11 +139,46 @@ using namespace webrtc;
+   glBindFramebuffer(GL_FRAMEBUFFER, _defaultFrameBuffer);
+   glViewport(0, 0, self.frame.size.width, self.frame.size.height);
+ 
++  _critSection->Leave();
++
+   return _gles_renderer20->Setup([self bounds].size.width,
+                                  [self bounds].size.height);
+ }
+ 
++- (void)layoutSubviews
++{
++  _critSection->Enter();
++
++  if (![EAGLContext setCurrentContext:_context]) {
++    _critSection->Leave();
++    return;
++  }
++
++  [_context renderbufferStorage:GL_RENDERBUFFER
++           fromDrawable:(CAEAGLLayer*)self.layer];
++
++  glBindRenderbuffer(GL_RENDERBUFFER, _colorRenderBuffer);
++  GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++  if (status != GL_FRAMEBUFFER_COMPLETE) {
++    NSLog(@"Couldn't resize; glCheckFramebufferStatus=%x view %@!!!", status, self);
++    // Try to relayout up to 15 times
++    if (_layoutRetries < 15) {
++      dispatch_async(dispatch_get_main_queue(), ^{
++        [self setNeedsLayout];
++      });
++    }
++    _layoutRetries++;
++  } else {
++    _layoutRetries = 0;
++  }
++
++  glViewport(0, 0, self.frame.size.width, self.frame.size.height);
++
++  _critSection->Leave();
++}
++
+ - (BOOL)presentFramebuffer {
++  _critSection->Enter();
+   if (![_context presentRenderbuffer:GL_RENDERBUFFER]) {
+     WEBRTC_TRACE(kTraceWarning,
+                  kTraceVideoRenderer,
+@@ -139,15 +188,22 @@ using namespace webrtc;
+                  __FUNCTION__,
+                  __LINE__);
+   }
++
++  _critSection->Leave();
+   return YES;
+ }
+ 
+ - (BOOL)renderFrame:(I420VideoFrame*)frameToRender {
++  _critSection->Enter();
+   if (![EAGLContext setCurrentContext:_context]) {
++    _critSection->Leave();
+     return NO;
+   }
+ 
+-  return _gles_renderer20->Render(*frameToRender);
++  BOOL answer = _gles_renderer20->Render(*frameToRender);
++  _critSection->Leave();
++
++  return answer;
+ }
+ 
+ - (BOOL)setCoordinatesForZOrder:(const float)zOrder

@@ -1,0 +1,18 @@
+Description: Per Niels' request restrict Opus bitrate to 32kbps.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/talk/media/webrtc/webrtcvoiceengine.cc
+===================================================================
+--- src.orig/talk/media/webrtc/webrtcvoiceengine.cc
++++ src/talk/media/webrtc/webrtcvoiceengine.cc
+@@ -442,6 +442,10 @@ static int GetOpusBitrate(const AudioCod
+ 
+     if (IsOpusStereoEnabled(codec)) {
+       bitrate *= 2;
++      // strukturag: Override bitrate for Opus if it is bigger than 32000
++      if (bitrate > kOpusBitrateFb) {
++        bitrate = kOpusBitrateFb;
++      }
+     }
+   } else if (bitrate < kOpusMinBitrate || bitrate > kOpusMaxBitrate) {
+     bitrate = (bitrate < kOpusMinBitrate) ? kOpusMinBitrate : kOpusMaxBitrate;

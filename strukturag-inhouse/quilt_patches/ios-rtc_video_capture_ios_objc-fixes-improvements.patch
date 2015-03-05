@@ -1,0 +1,305 @@
+Description: Added a couple of locks to mitigate data races. \
+  Changed the way device orientation is treated. \
+  Fixed issue with AVCaptureSessionPreset352x288 frame size.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/webrtc/modules/video_capture/ios/rtc_video_capture_ios_objc.mm
+===================================================================
+--- src.orig/webrtc/modules/video_capture/ios/rtc_video_capture_ios_objc.mm
++++ src/webrtc/modules/video_capture/ios/rtc_video_capture_ios_objc.mm
+@@ -30,10 +30,15 @@ using namespace webrtc::videocapturemodu
+   webrtc::videocapturemodule::VideoCaptureIos* _owner;
+   webrtc::VideoCaptureCapability _capability;
+   AVCaptureSession* _captureSession;
++  AVCaptureDevice* _currentCaptureDevice;
++  UIDeviceOrientation _deviceOrientation;
+   int _captureId;
+   AVCaptureConnection* _connection;
+   BOOL _captureChanging;  // Guarded by _captureChangingCondition.
+   NSCondition* _captureChangingCondition;
++
++  NSLock *_lock;
++  BOOL _shouldProcessVideoFrame;
+ }
+ 
+ @synthesize frameRotation = _framRotation;
+@@ -41,6 +46,7 @@ using namespace webrtc::videocapturemodu
+ - (id)initWithOwner:(VideoCaptureIos*)owner captureId:(int)captureId {
+   if (self == [super init]) {
+     _owner = owner;
++    _owner->SetCaptureRotation(kCameraRotate0);
+     _captureId = captureId;
+     _captureSession = [[AVCaptureSession alloc] init];
+ #if defined(__IPHONE_7_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_7_0
+@@ -49,8 +55,11 @@ using namespace webrtc::videocapturemodu
+       _captureSession.usesApplicationAudioSession = NO;
+     }
+ #endif
++    _deviceOrientation = [UIDevice currentDevice].orientation;
+     _captureChanging = NO;
+     _captureChangingCondition = [[NSCondition alloc] init];
++    _lock = [[NSLock alloc] init];
++    _shouldProcessVideoFrame = YES;
+ 
+     if (!_captureSession || !_captureChangingCondition) {
+       return nil;
+@@ -86,9 +95,11 @@ using namespace webrtc::videocapturemodu
+                    name:AVCaptureSessionRuntimeErrorNotification
+                  object:_captureSession];
+     [notify addObserver:self
+-               selector:@selector(statusBarOrientationDidChange:)
+-                   name:@"StatusBarOrientationDidChange"
++               selector:@selector(deviceDidChangeOrientation:)
++                   name:UIDeviceOrientationDidChangeNotification
+                  object:nil];
++
++    [self deviceDidChangeOrientation:nil];
+   }
+ 
+   return self;
+@@ -105,12 +116,9 @@ using namespace webrtc::videocapturemodu
+   [[self currentOutput] setSampleBufferDelegate:nil queue:NULL];
+ }
+ 
+-- (void)statusBarOrientationDidChange:(NSNotification*)notification {
+-  [self setRelativeVideoOrientation];
+-}
+-
+ - (void)dealloc {
+   [[NSNotificationCenter defaultCenter] removeObserver:self];
++  _owner = NULL;
+ }
+ 
+ - (BOOL)setCaptureDeviceByUniqueId:(NSString*)uniqueId {
+@@ -172,6 +180,9 @@ using namespace webrtc::videocapturemodu
+   [self directOutputToSelf];
+ 
+   _captureChanging = YES;
++  [_lock lock];
++  _shouldProcessVideoFrame = YES;
++  [_lock unlock];
+   dispatch_async(
+       dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+       ^(void) { [self startCaptureInBackgroundWithOutput:currentOutput]; });
+@@ -203,32 +214,51 @@ using namespace webrtc::videocapturemodu
+   // picture resolution
+   [_captureSession setSessionPreset:captureQuality];
+ 
+-  // take care of capture framerate now
+-  NSArray* sessionInputs = _captureSession.inputs;
+-  AVCaptureDeviceInput* deviceInput = [sessionInputs count] > 0 ?
+-      sessionInputs[0] : nil;
+-  AVCaptureDevice* inputDevice = deviceInput.device;
+-  if (inputDevice) {
+-    AVCaptureDeviceFormat* activeFormat = inputDevice.activeFormat;
+-    NSArray* supportedRanges = activeFormat.videoSupportedFrameRateRanges;
+-    AVFrameRateRange* targetRange = [supportedRanges count] > 0 ?
+-        supportedRanges[0] : nil;
+-    // Find the largest supported framerate less than capability maxFPS.
+-    for (AVFrameRateRange* range in supportedRanges) {
+-      if (range.maxFrameRate <= _capability.maxFPS &&
+-          targetRange.maxFrameRate <= range.maxFrameRate) {
+-        targetRange = range;
++  if ([[[UIDevice currentDevice] systemVersion] floatValue] >= 7.0) {
++    // take care of capture framerate now
++    NSArray* sessionInputs = _captureSession.inputs;
++    AVCaptureDeviceInput* deviceInput = [sessionInputs count] > 0 ?
++    sessionInputs[0] : nil;
++    AVCaptureDevice* inputDevice = deviceInput.device;
++    if (inputDevice) {
++      AVCaptureDeviceFormat* activeFormat = inputDevice.activeFormat;
++      NSArray* supportedRanges = activeFormat.videoSupportedFrameRateRanges;
++      AVFrameRateRange* targetRange = [supportedRanges count] > 0 ?
++      supportedRanges[0] : nil;
++      // Find the largest supported framerate less than capability maxFPS.
++      for (AVFrameRateRange* range in supportedRanges) {
++        if (range.maxFrameRate <= _capability.maxFPS &&
++            targetRange.maxFrameRate <= range.maxFrameRate) {
++          targetRange = range;
++        }
++      }
++      if (targetRange && [inputDevice lockForConfiguration:NULL]) {
++        inputDevice.activeVideoMinFrameDuration = targetRange.minFrameDuration;
++        inputDevice.activeVideoMaxFrameDuration = targetRange.minFrameDuration;
++        [inputDevice unlockForConfiguration];
+       }
+     }
+-    if (targetRange && [inputDevice lockForConfiguration:NULL]) {
+-      inputDevice.activeVideoMinFrameDuration = targetRange.minFrameDuration;
+-      inputDevice.activeVideoMaxFrameDuration = targetRange.minFrameDuration;
+-      [inputDevice unlockForConfiguration];
+-    }
+-  }
+ 
+-  _connection = [currentOutput connectionWithMediaType:AVMediaTypeVideo];
+-  [self setRelativeVideoOrientation];
++    _connection = [currentOutput connectionWithMediaType:AVMediaTypeVideo];
++  } else { // iOS6
++    CMTime cm_time = {1, _capability.maxFPS, kCMTimeFlags_Valid, 0};
++
++    // take care of capture framerate now
++    _connection = [currentOutput connectionWithMediaType:AVMediaTypeVideo];
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++    [_connection setVideoMinFrameDuration:cm_time];
++    [_connection setVideoMaxFrameDuration:cm_time];
++#pragma clang diagnostic pop
++  }
++
++  // We do not use video orientations provided by iOS.
++  // We set it to AVCaptureVideoOrientationLandscapeLeft and handle it with
++  // _owner->SetCaptureRotation(kCameraRotate<0,90,180,270>)
++  // when device orientation change notification is emited.
++  if (_connection.supportsVideoOrientation) {
++    _connection.videoOrientation = AVCaptureVideoOrientationLandscapeLeft;
++  }
+ 
+   // finished configuring, commit settings to AVCaptureSession.
+   [_captureSession commitConfiguration];
+@@ -237,29 +267,6 @@ using namespace webrtc::videocapturemodu
+   [self signalCaptureChangeEnd];
+ }
+ 
+-- (void)setRelativeVideoOrientation {
+-  if (!_connection.supportsVideoOrientation)
+-    return;
+-  switch ([UIApplication sharedApplication].statusBarOrientation) {
+-    case UIInterfaceOrientationPortrait:
+-#if defined(__IPHONE_8_0) && __IPHONE_OS_VERSION_MAX_ALLOWED >= __IPHONE_8_0
+-    case UIInterfaceOrientationUnknown:
+-#endif
+-      _connection.videoOrientation = AVCaptureVideoOrientationPortrait;
+-      break;
+-    case UIInterfaceOrientationPortraitUpsideDown:
+-      _connection.videoOrientation =
+-          AVCaptureVideoOrientationPortraitUpsideDown;
+-      break;
+-    case UIInterfaceOrientationLandscapeLeft:
+-      _connection.videoOrientation = AVCaptureVideoOrientationLandscapeLeft;
+-      break;
+-    case UIInterfaceOrientationLandscapeRight:
+-      _connection.videoOrientation = AVCaptureVideoOrientationLandscapeRight;
+-      break;
+-  }
+-}
+-
+ - (void)onVideoError:(NSNotification*)notification {
+   NSLog(@"onVideoError: %@", notification);
+   // TODO(sjlee): make the specific error handling with this notification.
+@@ -272,6 +279,49 @@ using namespace webrtc::videocapturemodu
+                __LINE__);
+ }
+ 
++- (void)deviceDidChangeOrientation:(NSNotification *)notification {
++  _deviceOrientation = [UIDevice currentDevice].orientation;
++
++  bool isBackCamera = false;
++
++  NSString *backCameraUniqueId = @"com.apple.avfoundation.avcapturedevice.built-in_video:0";
++  if (_captureSession.inputs.count) {
++    AVCaptureInput *input = [[_captureSession inputs] objectAtIndex:0];
++    if ([input isKindOfClass:[AVCaptureDeviceInput class]]) {
++      AVCaptureDeviceInput *deviceInput = (AVCaptureDeviceInput *)input;
++      AVCaptureDevice *device = [deviceInput device];
++      if ([[device uniqueID] isEqualToString:backCameraUniqueId]) {
++        isBackCamera = true;
++      }
++    }
++  }
++
++  VideoCaptureRotation currentRotation = kCameraRotate90;
++  switch (_deviceOrientation) {
++    case UIDeviceOrientationPortrait:
++      currentRotation = isBackCamera ? kCameraRotate270 : kCameraRotate90;
++      break;
++    case UIDeviceOrientationPortraitUpsideDown:
++      currentRotation = isBackCamera ? kCameraRotate90 : kCameraRotate270;
++      break;
++    case UIDeviceOrientationLandscapeLeft:
++      currentRotation = kCameraRotate180;
++      break;
++    case UIDeviceOrientationLandscapeRight:
++      currentRotation = kCameraRotate0;
++      break;
++    case UIDeviceOrientationFaceDown:
++    case UIDeviceOrientationFaceUp:
++      currentRotation = isBackCamera ? kCameraRotate270 : kCameraRotate90;
++      break;
++    default:
++      currentRotation = kCameraRotate0;
++      break;
++  }
++
++  _owner->SetCaptureRotation(currentRotation);
++}
++
+ - (BOOL)stopCapture {
+   [self waitForCaptureChangeToFinish];
+   [self directOutputToNil];
+@@ -281,6 +331,9 @@ using namespace webrtc::videocapturemodu
+   }
+ 
+   _captureChanging = YES;
++  [_lock lock];
++  _shouldProcessVideoFrame = NO;
++  [_lock unlock];
+   dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+                  ^(void) { [self stopCaptureInBackground]; });
+   return YES;
+@@ -316,6 +369,10 @@ using namespace webrtc::videocapturemodu
+     return NO;
+   }
+ 
++  if (_currentCaptureDevice != captureDevice) {
++    _currentCaptureDevice = captureDevice;
++  }
++
+   // now create capture session input out of AVCaptureDevice
+   NSError* deviceError = nil;
+   AVCaptureDeviceInput* newCaptureInput =
+@@ -350,12 +407,20 @@ using namespace webrtc::videocapturemodu
+ 
+   [_captureSession commitConfiguration];
+ 
++  [self deviceDidChangeOrientation:nil];
++
+   return addedCaptureInput;
+ }
+ 
+ - (void)captureOutput:(AVCaptureOutput*)captureOutput
+     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+            fromConnection:(AVCaptureConnection*)connection {
++
++  if (_owner == NULL || !_shouldProcessVideoFrame) {
++    //NSLog(@"owner %p shouldProcessVideoFrame = %@", _owner, _shouldProcessVideoFrame ? @"YES" : @"NO");
++    return;
++  }
++
+   const int kFlags = 0;
+   CVImageBufferRef videoFrame = CMSampleBufferGetImageBuffer(sampleBuffer);
+ 
+@@ -384,6 +449,24 @@ using namespace webrtc::videocapturemodu
+   tempCaptureCapability.maxFPS = _capability.maxFPS;
+   tempCaptureCapability.rawType = kVideoNV12;
+ 
++  // iOS hardware provides paddings for AVCaptureSessionPreset352x288, we move data to remove these padding to pass correct frame further
++  if (CVPixelBufferGetWidth(videoFrame) == 352) {
++    int w = CVPixelBufferGetWidth(videoFrame);
++    int h = CVPixelBufferGetHeight(videoFrame);
++
++    for (size_t i = 1; i < yPlaneHeight; ++i) {
++      memmove(baseAddress + i * w,
++              baseAddress + i * yPlaneBytesPerRow,
++              w);
++    }
++    for (size_t i = 1; i < uvPlaneHeight; ++i) {
++      memmove(baseAddress + w * yPlaneHeight + i * w,
++              baseAddress + yPlaneBytesPerRow * yPlaneHeight + i * uvPlaneBytesPerRow,
++              w);
++    }
++    frameSize = w * h * 1.5;
++  }
++
+   _owner->IncomingFrame(baseAddress, frameSize, tempCaptureCapability, 0);
+ 
+   CVPixelBufferUnlockBaseAddress(videoFrame, kFlags);

@@ -1,0 +1,39 @@
+Description: Restrict Opus to use CELT only \
+  by setting application setting to low-delay.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/webrtc/modules/audio_coding/codecs/opus/audio_encoder_opus.cc
+===================================================================
+--- src.orig/webrtc/modules/audio_coding/codecs/opus/audio_encoder_opus.cc
++++ src/webrtc/modules/audio_coding/codecs/opus/audio_encoder_opus.cc
+@@ -36,7 +36,7 @@ AudioEncoderOpus::Config::Config()
+     : frame_size_ms(20),
+       num_channels(1),
+       payload_type(120),
+-      application(kVoip) {
++      application(kLowDelay) {
+ }
+ 
+ bool AudioEncoderOpus::Config::IsOk() const {
+Index: src/webrtc/modules/audio_coding/main/acm2/acm_opus.cc
+===================================================================
+--- src.orig/webrtc/modules/audio_coding/main/acm2/acm_opus.cc
++++ src/webrtc/modules/audio_coding/main/acm2/acm_opus.cc
+@@ -69,7 +69,7 @@ ACMOpus::ACMOpus(int16_t codec_id)
+       bitrate_(20000),  // Default bit-rate.
+       channels_(1),  // Default mono.
+       packet_loss_rate_(0),  // Initial packet loss rate.
+-      application_(kVoip) {  // Initial application mode.
++      application_(kLowDelay) {  // Initial application mode.
+   codec_id_ = codec_id;
+   // Opus has internal DTX, but we dont use it for now.
+   has_internal_dtx_ = false;
+@@ -119,7 +119,7 @@ int16_t ACMOpus::InitEncoderSafe(WebRtcA
+   // Determine target application if codec is not initialized or a forced
+   // initialization is requested.
+   if (!encoder_initialized_ || force_initialization) {
+-    application_ = (codec_params->codec_inst.channels == 1) ? kVoip : kAudio;
++    application_ = kLowDelay;
+   }
+   return ACMGenericCodec::InitEncoderSafe(codec_params, force_initialization);
+ }

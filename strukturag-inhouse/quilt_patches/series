@@ -1,0 +1,16 @@
+public/ios-opengles20-unpack-alignment01.patch
+public/ios-video_capture_ios-robust.patch
+public/ios-video_device_info_ios-implementation.patch
+public/opus-low_delay-declaration.patch
+public/ios-proxy_detect_ios_implementation.patch
+ios-video_renderer_ios_view-fixes.patch
+ios-video_renderer_ios_channel-fixes.patch
+ios-use-webrtc-agc-aec-instead-of-ios-provided.patch
+ios-rtc_video_capture_ios_objc-fixes-improvements.patch
+limit-opus-bitrate.patch
+restrict-opus-to-lowdelay-celt.patch
+ios-audio_device_ios-enable-stereo-and-fixes.patch
+common-gypi-build-set-xcode-clang-and-ios-dep-target60.patch
+nss-dtls-1.2-enable-in-chromium-src.patch
+assert-opus-to-not-use-silk-for-encoding.patch
+macosx-10.11-build-fixes.patch

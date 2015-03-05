@@ -154,3 +154,5 @@
 /xcodebuild
 
 !*.sha1
+out_*
+.pc

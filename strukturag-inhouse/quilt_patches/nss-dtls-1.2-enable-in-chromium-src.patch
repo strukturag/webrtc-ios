@@ -1,0 +1,101 @@
+Description: Enable DTLS 1.2. This patch expect that nss library supports DTLS 1.2.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/net/third_party/nss/ssl/dtlscon.c
+===================================================================
+--- src.orig/net/third_party/nss/ssl/dtlscon.c
++++ src/net/third_party/nss/ssl/dtlscon.c
+@@ -51,17 +51,22 @@ static const ssl3CipherSuite nonDTLSSuit
+  *
+  * TLS             DTLS
+  * 1.1 (0302)      1.0 (feff)
++ * 1.2 (0303)      1.2 (fefd)
+  */
+ SSL3ProtocolVersion
+ dtls_TLSVersionToDTLSVersion(SSL3ProtocolVersion tlsv)
+ {
+-    /* Anything other than TLS 1.1 is an error, so return
+-     * the invalid version ffff. */
+-    if (tlsv != SSL_LIBRARY_VERSION_TLS_1_1)
+-	return 0xffff;
+-
++    if (tlsv == SSL_LIBRARY_VERSION_TLS_1_1) {
+     return SSL_LIBRARY_VERSION_DTLS_1_0_WIRE;
+ }
++    if (tlsv == SSL_LIBRARY_VERSION_TLS_1_2) {
++        return SSL_LIBRARY_VERSION_DTLS_1_2_WIRE;
++    }
++
++    /* Anything other than TLS 1.1 or 1.2 is an error, so return
++     * the invalid version 0xffff. */
++    return 0xffff;
++}
+ 
+ /* Map known DTLS versions to known TLS versions.
+  * - Invalid versions (< 1.0) return a version of 0
+@@ -74,11 +79,15 @@ dtls_DTLSVersionToTLSVersion(SSL3Protoco
+ 	return 0;
+     }
+ 
+-    if (dtlsv == SSL_LIBRARY_VERSION_DTLS_1_0_WIRE)
++    if (dtlsv == SSL_LIBRARY_VERSION_DTLS_1_0_WIRE) {
+ 	return SSL_LIBRARY_VERSION_TLS_1_1;
++    }
++    if (dtlsv == SSL_LIBRARY_VERSION_DTLS_1_2_WIRE) {
++        return SSL_LIBRARY_VERSION_TLS_1_2;
++    }
+ 
+     /* Return a fictional higher version than we know of */
+-    return SSL_LIBRARY_VERSION_TLS_1_1 + 1;
++    return SSL_LIBRARY_VERSION_TLS_1_2 + 1;
+ }
+ 
+ /* On this socket, Disable non-DTLS cipher suites in the argument's list */
+@@ -976,8 +985,8 @@ dtls_HandleHelloVerifyRequest(sslSocket 
+     	goto loser; 	/* alert has been sent */
+     }
+ 
+-    if (temp != SSL_LIBRARY_VERSION_DTLS_1_0_WIRE) {
+-	/* Note: this will need adjustment for DTLS 1.2 per Section 4.2.1 */
++    if (temp != SSL_LIBRARY_VERSION_DTLS_1_0_WIRE &&
++        temp != SSL_LIBRARY_VERSION_DTLS_1_2_WIRE) {
+ 	goto alert_loser;
+     }
+ 
+Index: src/net/third_party/nss/ssl/ssl3con.c
+===================================================================
+--- src.orig/net/third_party/nss/ssl/ssl3con.c
++++ src/net/third_party/nss/ssl/ssl3con.c
+@@ -9022,9 +9022,11 @@ ssl3_SendServerHello(sslSocket *ss)
+ 	    return SECFailure;
+ 	}
+     } else {
+-	PORT_Assert(MSB(ss->version) == MSB(SSL_LIBRARY_VERSION_DTLS_1_0));
++	PORT_Assert(MSB(ss->version) == MSB(SSL_LIBRARY_VERSION_DTLS_1_0) ||
++		    MSB(ss->version) == MSB(SSL_LIBRARY_VERSION_DTLS_1_2));
+ 
+-	if (MSB(ss->version) != MSB(SSL_LIBRARY_VERSION_DTLS_1_0)) {
++	if (MSB(ss->version) != MSB(SSL_LIBRARY_VERSION_DTLS_1_0) &&
++	    MSB(ss->version) != MSB(SSL_LIBRARY_VERSION_DTLS_1_2)) {
+ 	    PORT_SetError(SSL_ERROR_NO_CYPHER_OVERLAP);
+ 	    return SECFailure;
+ 	}
+Index: src/net/third_party/nss/ssl/sslproto.h
+===================================================================
+--- src.orig/net/third_party/nss/ssl/sslproto.h
++++ src/net/third_party/nss/ssl/sslproto.h
+@@ -18,12 +18,14 @@
+ #define SSL_LIBRARY_VERSION_TLS_1_2		0x0303
+ /* Note: this is the internal format, not the wire format */
+ #define SSL_LIBRARY_VERSION_DTLS_1_0		0x0302
++#define SSL_LIBRARY_VERSION_DTLS_1_2		0x0303
+ 
+ /* deprecated old name */
+ #define SSL_LIBRARY_VERSION_3_1_TLS SSL_LIBRARY_VERSION_TLS_1_0 
+ 
+ /* The DTLS version used in the spec */
+ #define SSL_LIBRARY_VERSION_DTLS_1_0_WIRE       ((~0x0100) & 0xffff)
++#define SSL_LIBRARY_VERSION_DTLS_1_2_WIRE       ((~0x0102) & 0xffff)
+ 
+ /* Header lengths of some of the messages */
+ #define SSL_HL_ERROR_HBYTES			3

@@ -18,7 +18,10 @@ deps = {
     Var('chromium_git') + '/external/gflags/src@e7390f9185c75f8d902c05ed7d20bb94eb914d0c', # from svn revision 82
 
   'src/third_party/junit':
-    Var('chromium_git') + '/external/webrtc/deps/third_party/junit@f35596b476aa6e62fd3b3857b9942ddcd13ce35e', # from svn revision 3367
+    Var('chromium_git') + '/external/junit@64155f8a9babcfcf4263cf4d08253a1556e75481',
+
+  'src/strukturag-inhouse/inhouse-deps/nss':
+    Var('chromium_git') + '/chromium/deps/nss@87b96db4268293187d7cf741907a6d5d1d8080e0' # NSS 3.16.7.
 }
 
 deps_os = {
@@ -72,22 +75,26 @@ hooks = [
     'action': ['python', 'src/setup_links.py'],
   },
   {
-    # Download test resources, i.e. video and audio files from Google Storage.
+    # Apply patches, setup links for inhouse changes. This should be done after setup_links hook
+    'name': 'apply_inhouse_patches',
     'pattern': '.',
-    'action': ['download_from_google_storage',
-               '--directory',
-               '--recursive',
-               '--num_threads=10',
-               '--no_auth',
-               '--bucket', 'chromium-webrtc-resources',
-               'src/resources'],
+    'action': ['python', 'src/strukturag-inhouse/apply-inhouse-patches.py'],
   },
   {
-    # A change to a .gyp, .gypi, or to GYP itself should run the generator.
-    'name': 'gyp',
+    # Make a symbolic link for build script in parent dir
+    'name': 'link build script',
     'pattern': '.',
-    'action': ['python', 'src/webrtc/build/gyp_webrtc',
-               Var('extra_gyp_flag')],
+    'action': ['ln', '-fs', 'src/strukturag-inhouse/make-webrtc.sh', 'make-webrtc.sh'],
   },
+
+  # We don't need this step since build script will do it anyway. Commenting out for now.
+  #{
+    ## A change to a .gyp, .gypi, or to GYP itself should run the generator.
+    #'name': 'gyp',
+    #'pattern': '.',
+    #'action': ['python', 'src/webrtc/build/gyp_webrtc',
+    #           Var('extra_gyp_flag')],
+
+  #},
 ]
 

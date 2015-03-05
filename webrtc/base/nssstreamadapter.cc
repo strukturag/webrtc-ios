@@ -66,6 +66,23 @@ static const SrtpCipherMapEntry kSrtpCipherMap[] = {
 };
 #endif
 
+// Ciphers to enable to get ECDHE encryption with endpoints that support it.
+static const uint32_t kEnabledCiphers[] = {
+  TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+  TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+  TLS_DHE_RSA_WITH_AES_128_GCM_SHA256,
+  TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+  TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+  TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+  TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+  TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+  TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+  TLS_DHE_RSA_WITH_AES_256_CBC_SHA256,
+  TLS_DHE_RSA_WITH_AES_128_CBC_SHA256,
+  TLS_DHE_RSA_WITH_AES_256_CBC_SHA,
+  TLS_DHE_RSA_WITH_AES_128_CBC_SHA,
+  TLS_DHE_DSS_WITH_AES_256_CBC_SHA,
+};
 
 // Implementation of NSPR methods
 static PRStatus StreamClose(PRFileDesc *socket) {
@@ -500,7 +517,7 @@ int NSSStreamAdapter::BeginSSL() {
   vrange.min =  (ssl_mode_ == SSL_MODE_DTLS) ?
       SSL_LIBRARY_VERSION_TLS_1_1 :
       SSL_LIBRARY_VERSION_TLS_1_0;
-  vrange.max = SSL_LIBRARY_VERSION_TLS_1_1;
+  vrange.max = SSL_LIBRARY_VERSION_TLS_1_2;
 
   rv = SSL_VersionRangeSet(ssl_fd_, &vrange);
   if (rv != SECSuccess) {
@@ -520,6 +537,15 @@ int NSSStreamAdapter::BeginSSL() {
     }
   }
 #endif
+
+  // Enable additional ciphers.
+  for (size_t i = 0; i < ARRAY_SIZE(kEnabledCiphers); i++) {
+    rv = SSL_CipherPrefSet(ssl_fd_, kEnabledCiphers[i], PR_TRUE);
+    if (rv != SECSuccess) {
+      Error("BeginSSL", -1, false);
+      return -1;
+    }
+  }
 
   // Certificate validation
   rv = SSL_AuthCertificateHook(ssl_fd_, AuthCertificateHook, this);

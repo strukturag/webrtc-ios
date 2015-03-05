@@ -1,0 +1,564 @@
+Description: Implemented stereo playout. Fixed issue with deadlocks \
+  in AudioUnits on audio interruptions (e.g. Incoming call). \
+  Added debug possibility to dump audio playout. \
+  Changed AVAudioSession mode, added preservation of user session type. \
+  Fixed minor issues.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+Author: Ivan Sein <ivan@struktur.de>
+
+Index: src/webrtc/modules/audio_device/ios/audio_device_ios.h
+===================================================================
+--- src.orig/webrtc/modules/audio_device/ios/audio_device_ios.h
++++ src/webrtc/modules/audio_device/ios/audio_device_ios.h
+@@ -12,6 +12,11 @@
+ #define WEBRTC_AUDIO_DEVICE_AUDIO_DEVICE_IOS_H
+ 
+ #include <AudioUnit/AudioUnit.h>
++#include <AudioToolBox/AudioSession.h>
++
++#ifdef DEBUG_AUDIO_DEVICE_IOS
++    #include <fstream>
++#endif //#ifdef DEBUG_AUDIO_DEVICE_IOS
+ 
+ #include "webrtc/modules/audio_device/audio_device_generic.h"
+ #include "webrtc/system_wrappers/interface/critical_section_wrapper.h"
+@@ -218,8 +223,9 @@ class AudioDeviceIOS : public AudioDevic
+   uint32_t _captureWorkerThreadId;
+ 
+   int32_t _id;
+-
++  
+   AudioUnit _auVoiceProcessing;
++  
+   void* _audioInterruptionObserver;
+ 
+  private:
+@@ -230,6 +236,8 @@ class AudioDeviceIOS : public AudioDevic
+   bool _recIsInitialized;
+   bool _playIsInitialized;
+ 
++  bool _isInterrupted;
++
+   bool _recordingDeviceIsSpecified;
+   bool _playoutDeviceIsSpecified;
+   bool _micIsInitialized;
+@@ -254,7 +262,7 @@ class AudioDeviceIOS : public AudioDevic
+   uint16_t _recError;
+ 
+   // Playout buffer, needed for 44.0 / 44.1 kHz mismatch
+-  int16_t _playoutBuffer[ENGINE_PLAY_BUF_SIZE_IN_SAMPLES];
++  int16_t _playoutBuffer[ENGINE_PLAY_BUF_SIZE_IN_SAMPLES * 2]; // we have to make it 2 times bigger in oreder to accomodate stereo playout
+   uint32_t  _playoutBufferUsed;  // How much is filled
+ 
+   // Recording buffers
+@@ -265,6 +273,10 @@ class AudioDeviceIOS : public AudioDevic
+ 
+   // Current total size all data in buffers, used for delay estimate
+   uint32_t _recordingBufferTotalSize;
++
++#ifdef DEBUG_AUDIO_DEVICE_IOS
++  std::fstream _fileHandle;
++#endif //#ifdef DEBUG_AUDIO_DEVICE_IOS
+ };
+ 
+ }  // namespace webrtc
+Index: src/webrtc/modules/audio_device/ios/audio_device_ios.mm
+===================================================================
+--- src.orig/webrtc/modules/audio_device/ios/audio_device_ios.mm
++++ src/webrtc/modules/audio_device/ios/audio_device_ios.mm
+@@ -16,6 +16,39 @@
+ #include "webrtc/system_wrappers/interface/thread_wrapper.h"
+ #include "webrtc/system_wrappers/interface/trace.h"
+ 
++
++#ifdef DEBUG_AUDIO_DEVICE_IOS
++    #include <assert.h>
++    #include <mach/mach.h>
++    #include <mach/mach_time.h>
++#include <unistd.h>
++
++
++// Unsafe, should be used only for debug
++const char *fileName ()
++{
++    NSString *tempDirectory = NSTemporaryDirectory();
++    NSString *tempSoundDumpFileName = [tempDirectory stringByAppendingPathComponent:@"sounddump.dat"];
++    if (tempDirectory) {
++        std::string fileName([tempSoundDumpFileName cStringUsingEncoding:NSUTF8StringEncoding]);
++        return fileName.c_str();
++    }
++
++    return NULL;
++}
++
++
++void printHexDump(char *start, int size)
++{
++    printf("hexDump of %p with size %d:\n", start, size);
++    for (int i = 0; i < size; i++) {
++        printf("%00x",(uint8_t)start[i]);
++    }
++    printf("    --- dump end\n");
++}
++#endif // #ifdef DEBUG_AUDIO_DEVICE_IOS
++
++
+ namespace webrtc {
+ AudioDeviceIOS::AudioDeviceIOS(const int32_t id)
+     :
+@@ -32,6 +65,7 @@ AudioDeviceIOS::AudioDeviceIOS(const int
+     _playing(false),
+     _recIsInitialized(false),
+     _playIsInitialized(false),
++    _isInterrupted(false),
+     _recordingDeviceIsSpecified(false),
+     _playoutDeviceIsSpecified(false),
+     _micIsInitialized(false),
+@@ -52,7 +86,6 @@ AudioDeviceIOS::AudioDeviceIOS(const int
+     _recordingBufferTotalSize(0) {
+     WEBRTC_TRACE(kTraceMemory, kTraceAudioDevice, id,
+                  "%s created", __FUNCTION__);
+-
+     memset(_playoutBuffer, 0, sizeof(_playoutBuffer));
+     memset(_recordingBuffer, 0, sizeof(_recordingBuffer));
+     memset(_recordingLength, 0, sizeof(_recordingLength));
+@@ -129,6 +162,19 @@ int32_t AudioDeviceIOS::Init() {
+         WEBRTC_TRACE(kTraceWarning, kTraceAudioDevice,
+                      _id, "Thread already created");
+     }
++
++    /*
++     We assume that the application has an Audio Session already initialized.
++     We will initialize Audio Session Category to the required value in InitPlayOrRecord() method
++     and set it back to to the value it had before initializing AudioDeviceIPhone in ShutdownPlayOrRecord().
++     AudioDeviceIPhone class leaves AudioSession in an Active state so it is up to application to set it
++     to the required state again.
++     */
++
++#ifdef DEBUG_AUDIO_DEVICE_IOS
++    std::remove(fileName());
++#endif // #ifdef DEBUG_AUDIO_DEVICE_IOS
++
+     _playWarning = 0;
+     _playError = 0;
+     _recWarning = 0;
+@@ -162,6 +208,13 @@ int32_t AudioDeviceIOS::Terminate() {
+     // Shut down Audio Unit
+     ShutdownPlayOrRecord();
+ 
++    NSError *error = nil;
++    if([[AVAudioSession sharedInstance] setActive:NO error:&error] != noErr) {
++        const char *cError = [[error description] cStringUsingEncoding:NSUTF8StringEncoding];
++        WEBRTC_TRACE(kTraceDebug, kTraceAudioDevice,
++                     _id, "Couldn't Set AudioSession deactive (res=%s)", cError);
++    }
++
+     _isShutDown = true;
+     _initialized = false;
+     _speakerIsInitialized = false;
+@@ -463,8 +516,7 @@ int32_t AudioDeviceIOS::StereoPlayoutIsA
+     WEBRTC_TRACE(kTraceModuleCall, kTraceAudioDevice, _id,
+                  "%s", __FUNCTION__);
+ 
+-    available = false;  // Stereo playout not supported on iOS
+-
++    available = true;
+     return 0;
+ }
+ 
+@@ -472,11 +524,6 @@ int32_t AudioDeviceIOS::SetStereoPlayout
+     WEBRTC_TRACE(kTraceModuleCall, kTraceAudioDevice, _id,
+                  "AudioDeviceIOS::SetStereoPlayout(enable=%u)", enable);
+ 
+-    if (enable) {
+-        WEBRTC_TRACE(kTraceWarning, kTraceAudioDevice, _id,
+-                     " Stereo playout is not supported on this platform");
+-        return -1;
+-    }
+     return 0;
+ }
+ 
+@@ -682,29 +729,19 @@ int32_t AudioDeviceIOS::SetLoudspeakerSt
+                  "AudioDeviceIOS::SetLoudspeakerStatus(enable=%d)", enable);
+ 
+     AVAudioSession* session = [AVAudioSession sharedInstance];
+-    NSString* category = session.category;
+-    AVAudioSessionCategoryOptions options = session.categoryOptions;
+-    // Respect old category options if category is
+-    // AVAudioSessionCategoryPlayAndRecord. Otherwise reset it since old options
+-    // might not be valid for this category.
+-    if ([category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
+-      if (enable) {
+-        options |= AVAudioSessionCategoryOptionDefaultToSpeaker;
+-      } else {
+-        options &= ~AVAudioSessionCategoryOptionDefaultToSpeaker;
+-      }
+-    } else {
+-      options = AVAudioSessionCategoryOptionDefaultToSpeaker;
+-    }
+-
+     NSError* error = nil;
+-    [session setCategory:AVAudioSessionCategoryPlayAndRecord
+-             withOptions:options
+-                   error:&error];
+-    if (error != nil) {
+-      WEBRTC_TRACE(kTraceError, kTraceAudioDevice, _id,
+-                   "Error changing default output route ");
+-      return -1;
++
++    AVAudioSessionRouteDescription* route = [[AVAudioSession sharedInstance] currentRoute];
++    for (AVAudioSessionPortDescription* desc in [route outputs]) {
++        if ([[desc portType] isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
++            WEBRTC_TRACE(kTraceInfo, kTraceAudioDevice, _id, "Changing from headphone to speaker");
++            [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker
++                               error:&error];
++            if (error != nil) {
++                WEBRTC_TRACE(kTraceError, kTraceAudioDevice, _id, "Error changing default output route ");
++                return -1;
++            }
++        }
+     }
+ 
+     return 0;
+@@ -976,6 +1013,12 @@ int32_t AudioDeviceIOS::StartPlayout() {
+     _playWarning = 0;
+     _playError = 0;
+ 
++#ifdef DEBUG_AUDIO_DEVICE_IOS
++    if (!_fileHandle.is_open()) {
++        _fileHandle.open(fileName(), std::fstream::out | std::fstream::in | std::fstream::app | std::fstream::binary);
++    }
++#endif // #ifdef DEBUG_AUDIO_DEVICE_IOS
++
+     if (!_recording) {
+         // Start Audio Unit
+         WEBRTC_TRACE(kTraceDebug, kTraceAudioDevice, _id,
+@@ -1155,6 +1198,15 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+ 
+     OSStatus result = -1;
+ 
++    NSError *error = nil;
++    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayAndRecord error:&error];
++
++    if (error) {
++        const char* errorString = [[error localizedDescription] UTF8String];
++        WEBRTC_TRACE(kTraceDebug, kTraceAudioDevice,
++                     _id, "Couldn't Set AudioSession category to PlayAndRecord: %s", errorString);
++    }
++
+     // Check if already initialized
+     if (NULL != _auVoiceProcessing) {
+         // We already have initialized before and created any of the audio unit,
+@@ -1165,6 +1217,12 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+         return 0;
+     }
+ 
++    if ([AVAudioSession sharedInstance].inputAvailable == NO) {
++        WEBRTC_TRACE(kTraceError, kTraceAudioDevice, _id,
++                     "  Audio input is not available (result=false)");
++        return -1;
++    }
++
+     // Create Voice Processing Audio Unit
+     AudioComponentDescription desc;
+     AudioComponent comp;
+@@ -1195,9 +1253,9 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+     }
+ 
+     // Set preferred hardware sample rate to 16 kHz
+-    NSError* error = nil;
++    error = nil;
+     AVAudioSession* session = [AVAudioSession sharedInstance];
+-    Float64 preferredSampleRate(16000.0);
++    Float64 preferredSampleRate(32000.0);
+     [session setPreferredSampleRate:preferredSampleRate
+                               error:&error];
+     if (error != nil) {
+@@ -1220,6 +1278,7 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+     }
+     error = nil;
+     [session setCategory:AVAudioSessionCategoryPlayAndRecord
++             withOptions:AVAudioSessionCategoryOptionAllowBluetooth
+                    error:&error];
+     if (error != nil) {
+         const char* errorString = [[error localizedDescription] UTF8String];
+@@ -1324,7 +1383,13 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+ 
+     // Store the sampling frequency to use towards the Audio Device Buffer
+     // todo: Add 48 kHz (increase buffer sizes). Other fs?
+-    if ((playoutDesc.mSampleRate > 44090.0)
++    if ((playoutDesc.mSampleRate > 47090.0)
++        && (playoutDesc.mSampleRate < 48010.0)) {
++        _adbSampFreq = 48000;
++    } else if ((playoutDesc.mSampleRate > 31990.0)
++               && (playoutDesc.mSampleRate < 32010.0)) {
++        _adbSampFreq = 32000;
++    } else if ((playoutDesc.mSampleRate > 44090.0)
+         && (playoutDesc.mSampleRate < 44110.0)) {
+         _adbSampFreq = 44100;
+     } else if ((playoutDesc.mSampleRate > 15990.0)
+@@ -1355,14 +1420,33 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+             _adbSampFreq);
+     }
+ 
++    bool stereoPlayoutIsEnabled = false;
++    this->StereoPlayoutIsAvailable(stereoPlayoutIsEnabled);
++
+     // Set stream format for in/0  (use same sampling frequency as for out/0)
+-    playoutDesc.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger
+-                               | kLinearPCMFormatFlagIsPacked
+-                               | kLinearPCMFormatFlagIsNonInterleaved;
+-    playoutDesc.mBytesPerPacket = 2;
+-    playoutDesc.mFramesPerPacket = 1;
+-    playoutDesc.mBytesPerFrame = 2;
+-    playoutDesc.mChannelsPerFrame = 1;
++    playoutDesc.mFormatID = kAudioFormatLinearPCM;
++
++    if (!stereoPlayoutIsEnabled) {
++
++        printf("Configuring playout ASBD to be mono\n");
++        playoutDesc.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger
++                                    | kLinearPCMFormatFlagIsPacked
++                                   | kLinearPCMFormatFlagIsNonInterleaved;
++        playoutDesc.mBytesPerPacket = 2;//4;
++        playoutDesc.mFramesPerPacket = 1;
++        playoutDesc.mBytesPerFrame = 2;//4;
++        playoutDesc.mChannelsPerFrame = 1;//2;
++    } else {
++        printf("Configuring playout ASBD to be stereo\n");
++        playoutDesc.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger
++        | kLinearPCMFormatFlagIsPacked
++        | kLinearPCMFormatFlagIsNonInterleaved;
++        playoutDesc.mBytesPerPacket = 2;//4;
++        playoutDesc.mFramesPerPacket = 1;
++        playoutDesc.mBytesPerFrame = 2;//4;
++        playoutDesc.mChannelsPerFrame = 2;//2;
++    }
++
+     playoutDesc.mBitsPerChannel = 16;
+     result = AudioUnitSetProperty(_auVoiceProcessing,
+                                   kAudioUnitProperty_StreamFormat,
+@@ -1436,10 +1520,13 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+           AVAudioSessionInterruptionType type =
+               (AVAudioSessionInterruptionType)[typeNumber unsignedIntegerValue];
+           switch (type) {
+-            case AVAudioSessionInterruptionTypeBegan:
++            case AVAudioSessionInterruptionTypeBegan: {
++
++                _isInterrupted = true;
+               // At this point our audio session has been deactivated and the
+               // audio unit render callbacks no longer occur. Nothing to do.
+-              break;
++                break;
++              }
+             case AVAudioSessionInterruptionTypeEnded: {
+               NSError* error = nil;
+               AVAudioSession* session = [AVAudioSession sharedInstance];
+@@ -1453,6 +1540,7 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+               // automatically continue, so we restart the unit manually here.
+               AudioOutputUnitStop(_auVoiceProcessing);
+               AudioOutputUnitStart(_auVoiceProcessing);
++              _isInterrupted = false;
+               break;
+             }
+           }
+@@ -1477,6 +1565,24 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+ int32_t AudioDeviceIOS::ShutdownPlayOrRecord() {
+     WEBRTC_TRACE(kTraceInfo, kTraceAudioDevice, _id, "%s", __FUNCTION__);
+ 
++    NSError *error = nil;
++    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategorySoloAmbient error:&error];
++
++    if (error) {
++        const char* errorString = [[error localizedDescription] UTF8String];
++        WEBRTC_TRACE(kTraceDebug, kTraceAudioDevice,
++                     _id, "Couldn't Set AudioSession category to previously saved: %s", errorString);
++    }
++
++    error = nil;
++    [[AVAudioSession sharedInstance] setMode:AVAudioSessionModeDefault
++                                       error:&error];
++    if (error != nil) {
++        const char* errorString = [[error localizedDescription] UTF8String];
++        WEBRTC_TRACE(kTraceInfo, kTraceAudioDevice, _id,
++                     "Could not set mode: %s", errorString);
++    }
++
+     if (_audioInterruptionObserver != NULL) {
+         NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+         // Transfer ownership of observer back to ARC, which will dealloc the
+@@ -1561,7 +1667,7 @@ OSStatus
+         return 0;
+     }
+ 
+-    if (_recording) {
++    if (_recording && !_isInterrupted) {
+         // Insert all data in temp buffer into recording buffers
+         // There is zero or one buffer partially full at any given time,
+         // all others are full or empty
+@@ -1652,11 +1758,15 @@ OSStatus
+     // Setup some basic stuff
+ //    assert(sizeof(short) == 2); // Assumption for implementation
+ 
+-    int16_t* data =
+-        static_cast<int16_t*>(ioData->mBuffers[0].mData);
+-    unsigned int dataSizeBytes = ioData->mBuffers[0].mDataByteSize;
+-    unsigned int dataSize = dataSizeBytes/2;  // Number of samples
+-        if (dataSize != inNumberFrames) {  // Should always be the same
++    int bytesPerChanel = 2;
++    int numChanels = 2;
++    int bytesPerFrame = bytesPerChanel * numChanels;
++
++    int16_t* dataLeft = static_cast<int16_t*>(ioData->mBuffers[0].mData);
++    int16_t* dataRight = static_cast<int16_t*>(ioData->mBuffers[1].mData);
++    unsigned int dataSizeBytes = ioData->mBuffers[0].mDataByteSize * numChanels;
++    unsigned int dataSize = dataSizeBytes / bytesPerFrame;
++    if (dataSize != inNumberFrames) {  // Should always be the same
+         WEBRTC_TRACE(kTraceWarning, kTraceAudioDevice, _id,
+                      "dataSize (%u) != inNumberFrames (%u)",
+                      dataSize, (unsigned int)inNumberFrames);
+@@ -1666,16 +1776,16 @@ OSStatus
+         }
+         _playWarning = 1;
+     }
+-    memset(data, 0, dataSizeBytes);  // Start with empty buffer
+-
++    memset(dataLeft, 0, dataSizeBytes/numChanels);  // Start with empty buffer
++    memset(dataRight, 0, dataSizeBytes/numChanels);
+ 
+     // Get playout data from Audio Device Buffer
+ 
+-    if (_playing) {
++    if (_playing && !_isInterrupted) {
+         unsigned int noSamp10ms = _adbSampFreq / 100;
+         // todo: Member variable and allocate when samp freq is determined
+-        int16_t* dataTmp = new int16_t[noSamp10ms];
+-        memset(dataTmp, 0, 2*noSamp10ms);
++        int16_t* dataTmp = new int16_t[noSamp10ms * numChanels];
++        memset(dataTmp, 0, sizeof(int16_t) * noSamp10ms * numChanels);
+         unsigned int dataPos = 0;
+         int noSamplesOut = 0;
+         unsigned int nCopy = 0;
+@@ -1697,10 +1807,25 @@ OSStatus
+                 }
+                 _playWarning = 1;
+             }
+-            memcpy(data, _playoutBuffer, 2*nCopy);
++
++            memcpy(dataTmp, _playoutBuffer, bytesPerFrame * nCopy);
++
++#ifdef DEBUG_AUDIO_DEVICE_IOS
++            if (_fileHandle.is_open()) {
++                _fileHandle.write(reinterpret_cast<char*>(dataTmp), nCopy*bytesPerFrame);
++            }
++#endif // #ifdef DEBUG_AUDIO_DEVICE_IOS
++
++            for (unsigned int i = 0; i < nCopy; i++) {
++                dataLeft[i] = dataTmp[i * 2];
++                dataRight[i] = dataTmp[i * 2 + 1];
++            }
++
+             dataPos = nCopy;
+             memset(_playoutBuffer, 0, sizeof(_playoutBuffer));
+             _playoutBufferUsed = 0;
++
++            memset(dataTmp, 0, nCopy * bytesPerFrame);
+         }
+ 
+         // Now get the rest from Audio Device Buffer
+@@ -1730,14 +1855,26 @@ OSStatus
+             }
+ 
+             // Insert as much as fits in data buffer
+-            nCopy = (dataSize-dataPos) > noSamp10ms ?
+-                    noSamp10ms : (dataSize-dataPos);
+-            memcpy(&data[dataPos], dataTmp, 2*nCopy);
++            nCopy = (dataSize - dataPos) > noSamp10ms ? noSamp10ms : (dataSize - dataPos);
++
++#ifdef DEBUG_AUDIO_DEVICE_IOS
++            if (_fileHandle.is_open()) {
++                _fileHandle.write(reinterpret_cast<char*>(dataTmp), nCopy*bytesPerFrame);
++                _fileHandle.flush();
++            }
++#endif // #ifdef DEBUG_AUDIO_DEVICE_IOS
++
++            for (unsigned int i = 0; i < nCopy; i++) {
++                dataLeft[dataPos + i] = dataTmp[i * 2];
++                dataRight[dataPos + i] = dataTmp[i * 2 + 1];
++            }
+ 
+             // Save rest in playout buffer if any
+             if (nCopy < noSamp10ms) {
+-                memcpy(_playoutBuffer, &dataTmp[nCopy], 2*(noSamp10ms-nCopy));
++                memcpy(_playoutBuffer, &dataTmp[nCopy * numChanels], bytesPerFrame * (noSamp10ms - nCopy));
+                 _playoutBufferUsed = noSamp10ms - nCopy;
++            } else {
++                _playoutBufferUsed = 0;
+             }
+ 
+             // Update loop/index counter, if we copied less than noSamp10ms
+@@ -1751,6 +1888,7 @@ OSStatus
+     return 0;
+ }
+ 
++
+ void AudioDeviceIOS::UpdatePlayoutDelay() {
+     ++_playoutDelayMeasurementCounter;
+ 
+@@ -1776,14 +1914,16 @@ void AudioDeviceIOS::UpdatePlayoutDelay(
+         // AU latency
+         Float64 f64(0);
+         UInt32 size = sizeof(f64);
+-        OSStatus result = AudioUnitGetProperty(
+-            _auVoiceProcessing, kAudioUnitProperty_Latency,
+-            kAudioUnitScope_Global, 0, &f64, &size);
+-        if (0 != result) {
+-            WEBRTC_TRACE(kTraceError, kTraceAudioDevice, _id,
+-                         "error AU latency (result=%d)", result);
++        if (!_isInterrupted) {
++            OSStatus result = AudioUnitGetProperty(
++                _auVoiceProcessing, kAudioUnitProperty_Latency,
++                kAudioUnitScope_Global, 0, &f64, &size);
++            if (0 != result) {
++                WEBRTC_TRACE(kTraceError, kTraceAudioDevice, _id,
++                             "error AU latency (result=%d)", result);
++            }
++            assert(f64 >= 0);
+         }
+-        assert(f64 >= 0);
+         totalDelaySeconds += f64;
+ 
+         // To ms
+@@ -1821,14 +1961,16 @@ void AudioDeviceIOS::UpdateRecordingDela
+         // AU latency
+         Float64 f64(0);
+         UInt32 size = sizeof(f64);
+-        OSStatus result = AudioUnitGetProperty(
+-             _auVoiceProcessing, kAudioUnitProperty_Latency,
+-             kAudioUnitScope_Global, 0, &f64, &size);
+-        if (0 != result) {
+-            WEBRTC_TRACE(kTraceError, kTraceAudioDevice, _id,
+-                         "error AU latency (result=%d)", result);
++        if (!_isInterrupted) {
++            OSStatus result = AudioUnitGetProperty(
++                 _auVoiceProcessing, kAudioUnitProperty_Latency,
++                 kAudioUnitScope_Global, 0, &f64, &size);
++            if (0 != result) {
++                WEBRTC_TRACE(kTraceError, kTraceAudioDevice, _id,
++                             "error AU latency (result=%d)", result);
++            }
++            assert(f64 >= 0);
+         }
+-        assert(f64 >= 0);
+         totalDelaySeconds += f64;
+ 
+         // To ms
+@@ -1855,7 +1997,7 @@ bool AudioDeviceIOS::RunCapture(void* pt
+ }
+ 
+ bool AudioDeviceIOS::CaptureWorkerThread() {
+-    if (_recording) {
++    if (_recording && !_isInterrupted) {
+         int bufPos = 0;
+         unsigned int lowestSeq = 0;
+         int lowestSeqBufPos = 0;

@@ -1,0 +1,145 @@
+Description: Implemented http proxy detection for iOS. \
+  This requires allowing macconversion.h,mm to work with iOS.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/webrtc/base/base.gyp
+===================================================================
+--- src.orig/webrtc/base/base.gyp
++++ src/webrtc/base/base.gyp
+@@ -579,6 +579,9 @@
+           ],
+         }],
+         ['OS=="ios"', {
++          'sources/': [
++            ['include', 'macconversion.*'],
++          ],
+           'all_dependent_settings': {
+             'xcode_settings': {
+               'OTHER_LDFLAGS': [
+Index: src/webrtc/base/macconversion.cc
+===================================================================
+--- src.orig/webrtc/base/macconversion.cc
++++ src/webrtc/base/macconversion.cc
+@@ -8,7 +8,7 @@
+  *  be found in the AUTHORS file in the root of the source tree.
+  */
+ 
+-#if defined(WEBRTC_MAC) && !defined(WEBRTC_IOS)
++#if defined(WEBRTC_MAC) || defined(WEBRTC_IOS)
+ 
+ #include <CoreFoundation/CoreFoundation.h>
+ 
+@@ -156,4 +156,4 @@ bool p_isCFNumberTrue(CFNumberRef cfn) {
+   return result;
+ }
+ 
+-#endif  // WEBRTC_MAC && !defined(WEBRTC_IOS)
++#endif  // WEBRTC_MAC || WEBRTC_IOS
+Index: src/webrtc/base/macconversion.h
+===================================================================
+--- src.orig/webrtc/base/macconversion.h
++++ src/webrtc/base/macconversion.h
+@@ -11,7 +11,7 @@
+ #ifndef WEBRTC_BASE_MACCONVERSION_H_
+ #define WEBRTC_BASE_MACCONVERSION_H_
+ 
+-#if defined(WEBRTC_MAC) && !defined(WEBRTC_IOS)
++#if defined(WEBRTC_MAC) || defined(WEBRTC_IOS)
+ 
+ #include <CoreFoundation/CoreFoundation.h>
+ 
+@@ -34,6 +34,6 @@ bool p_convertCFNumberToInt(CFNumberRef 
+ // given a CFNumberRef, determine if it represents a true value.
+ bool p_isCFNumberTrue(CFNumberRef cfn);
+ 
+-#endif  // WEBRTC_MAC && !defined(WEBRTC_IOS)
++#endif  // WEBRTC_MAC || WEBRTC_IOS
+ 
+ #endif  // WEBRTC_BASE_MACCONVERSION_H_
+Index: src/webrtc/base/proxydetect.cc
+===================================================================
+--- src.orig/webrtc/base/proxydetect.cc
++++ src/webrtc/base/proxydetect.cc
+@@ -27,6 +27,12 @@
+ #include "macconversion.h"
+ #endif
+ 
++#ifdef WEBRTC_IOS
++#include <CFNetwork/CFNetwork.h>
++#include "macconversion.h"
++#endif
++
++
+ #include <map>
+ 
+ #include "webrtc/base/fileutils.h"
+@@ -1179,6 +1185,60 @@ bool GetMacProxySettings(ProxyInfo* prox
+ }
+ #endif  // WEBRTC_MAC && !defined(WEBRTC_IOS)
+ 
++#ifdef WEBRTC_IOS
++// iOS has only http proxy
++bool GetiOSProxySettings(ProxyInfo* proxy) {
++
++  bool result = false;
++
++  CFDictionaryRef proxyDic = CFNetworkCopySystemProxySettings();
++
++  if (proxyDic) {
++    CFNumberRef proxiesHTTPEnable = (CFNumberRef)CFDictionaryGetValue(proxyDic, kCFNetworkProxiesHTTPEnable);
++    if (p_isCFNumberTrue(proxiesHTTPEnable)) {
++      CFStringRef proxyAddress = (CFStringRef)CFDictionaryGetValue(proxyDic, kCFNetworkProxiesHTTPProxy);
++      CFNumberRef proxyPort = (CFNumberRef)CFDictionaryGetValue(proxyDic, kCFNetworkProxiesHTTPPort);
++
++      // we use this as a scratch variable for determining if operations
++      // succeeded.
++      bool converted = false;
++
++      // the data we need to construct the SocketAddress for the proxy.
++      std::string hostname;
++      int port;
++
++      converted = p_convertHostCFStringRefToCPPString(proxyAddress, hostname);
++      if (converted) {
++        converted = p_convertCFNumberToInt(proxyPort, &port);
++        if (converted) {
++          // we have something enabled, with a hostname and a port.
++          // That's sufficient to set up the proxy info.
++
++          // Finally, try HTTP proxy. Note that flute doesn't
++          // differentiate between HTTPS and HTTP, hence we are using the
++          // same flute type here, ie. PROXY_HTTPS.
++          proxy->type = PROXY_HTTPS;
++
++          proxy->address.SetIP(hostname);
++          proxy->address.SetPort(port);
++          result = true;
++        }
++      }
++
++    }
++
++    // We created the dictionary with something that had the
++    // word 'copy' in it, so we have to release it, according
++    // to the Carbon memory management standards.
++    CFRelease(proxyDic);
++  } else {
++    LOG(LS_ERROR) << "CFNetworkCopySystemProxySettings failed";
++  }
++
++  return result;
++}
++#endif // WEBRTC_IOS
++
+ bool AutoDetectProxySettings(const char* agent, const char* url,
+                              ProxyInfo* proxy) {
+ #if defined(WEBRTC_WIN)
+@@ -1195,6 +1255,8 @@ bool GetSystemDefaultProxySettings(const
+   return GetIeProxySettings(agent, url, proxy);
+ #elif defined(WEBRTC_MAC) && !defined(WEBRTC_IOS)
+   return GetMacProxySettings(proxy);
++#elif defined(WEBRTC_IOS)
++  return GetiOSProxySettings(proxy);
+ #else
+   // TODO: Get System settings if browser is not firefox.
+   return GetFirefoxProxySettings(url, proxy);

@@ -1,0 +1,286 @@
+Description: Implemented  video device info for iOS.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/webrtc/modules/video_capture/ios/device_info_ios.h
+===================================================================
+--- src.orig/webrtc/modules/video_capture/ios/device_info_ios.h
++++ src/webrtc/modules/video_capture/ios/device_info_ios.h
+@@ -13,6 +13,8 @@
+ 
+ #include "webrtc/modules/video_capture/device_info_impl.h"
+ 
++#include <map>
++
+ namespace webrtc {
+ namespace videocapturemodule {
+ class DeviceInfoIos : public DeviceInfoImpl {
+@@ -55,6 +57,9 @@ class DeviceInfoIos : public DeviceInfoI
+ 
+   virtual int32_t CreateCapabilityMap(
+       const char* device_unique_id_utf8) OVERRIDE;
++
++ private:
++  std::map<std::string, VideoCaptureCapabilities> capabilitiesMap_;
+ };
+ 
+ }  // namespace videocapturemodule
+Index: src/webrtc/modules/video_capture/ios/device_info_ios.mm
+===================================================================
+--- src.orig/webrtc/modules/video_capture/ios/device_info_ios.mm
++++ src/webrtc/modules/video_capture/ios/device_info_ios.mm
+@@ -17,9 +17,18 @@
+ #include "webrtc/modules/video_capture/video_capture_impl.h"
+ #include "webrtc/system_wrappers/interface/trace.h"
+ 
++#include <AVFoundation/AVFoundation.h>
++#include <string>
++
+ using namespace webrtc;
+ using namespace videocapturemodule;
+ 
++static NSArray *camera_presets = @[AVCaptureSessionPreset352x288,
++                                   AVCaptureSessionPreset640x480,
++                                   AVCaptureSessionPreset1280x720,
++                                   AVCaptureSessionPreset1920x1080];
++
++
+ #define IOS_UNSUPPORTED()                                  \
+   WEBRTC_TRACE(kTraceError,                                \
+                kTraceVideoCapture,                         \
+@@ -34,11 +43,41 @@ VideoCaptureModule::DeviceInfo* VideoCap
+ }
+ 
+ DeviceInfoIos::DeviceInfoIos(const int32_t device_id)
+-    : DeviceInfoImpl(device_id) {}
++    : DeviceInfoImpl(device_id) {
++  this->Init();
++}
+ 
+ DeviceInfoIos::~DeviceInfoIos() {}
+ 
+-int32_t DeviceInfoIos::Init() { return 0; }
++int32_t DeviceInfoIos::Init() {
++
++  // Fill in all device capabilities;
++
++  int deviceCount = [DeviceInfoIosObjC captureDeviceCount];
++
++  for (int i = 0; i < deviceCount; i++) {
++
++    AVCaptureDevice *avDevice = [DeviceInfoIosObjC captureDeviceForIndex:i];
++    VideoCaptureCapabilities capabilityVector;
++
++    for (NSString *preset in camera_presets) {
++      BOOL support = [avDevice supportsAVCaptureSessionPreset:preset];
++      if (support) {
++        VideoCaptureCapability capability = [DeviceInfoIosObjC capabilityForPreset:preset];
++        capabilityVector.push_back(capability);
++      }
++    }
++
++    char deviceNameUTF8[256];
++    char deviceId[256];
++    this->GetDeviceName(i, deviceNameUTF8, 256, deviceId, 256);
++    std::string deviceId_copy(deviceId);
++    std::pair<std::string, VideoCaptureCapabilities> mapPair = std::pair<std::string, VideoCaptureCapabilities> (deviceId_copy, capabilityVector);
++    capabilitiesMap_.insert(mapPair);
++  }
++
++  return 0;
++}
+ 
+ uint32_t DeviceInfoIos::NumberOfDevices() {
+   return [DeviceInfoIosObjC captureDeviceCount];
+@@ -72,20 +111,80 @@ int32_t DeviceInfoIos::GetDeviceName(uin
+ }
+ 
+ int32_t DeviceInfoIos::NumberOfCapabilities(const char* deviceUniqueIdUTF8) {
+-  IOS_UNSUPPORTED();
++
++  int32_t numberOfCapabilities = 0;
++  std::string deviceUniqueId(deviceUniqueIdUTF8);
++  std::map<std::string, VideoCaptureCapabilities>::iterator it =
++      capabilitiesMap_.find(deviceUniqueId);
++
++  if (it != capabilitiesMap_.end()) {
++    numberOfCapabilities = it->second.size();
++  }
++  return numberOfCapabilities;
+ }
+ 
+ int32_t DeviceInfoIos::GetCapability(const char* deviceUniqueIdUTF8,
+                                      const uint32_t deviceCapabilityNumber,
+                                      VideoCaptureCapability& capability) {
+-  IOS_UNSUPPORTED();
++
++  std::string deviceUniqueId(deviceUniqueIdUTF8);
++  std::map<std::string, VideoCaptureCapabilities>::iterator it =
++      capabilitiesMap_.find(deviceUniqueId);
++
++  if (it != capabilitiesMap_.end()) {
++    VideoCaptureCapabilities deviceCapabilities = it->second;
++
++    if (deviceCapabilityNumber < deviceCapabilities.size()) {
++      VideoCaptureCapability cap;
++      cap = deviceCapabilities[deviceCapabilityNumber];
++      capability = cap;
++      return 0;
++    }
++  }
++
++  return -1;
+ }
+ 
+ int32_t DeviceInfoIos::GetBestMatchedCapability(
+     const char* deviceUniqueIdUTF8,
+     const VideoCaptureCapability& requested,
+     VideoCaptureCapability& resulting) {
+-  IOS_UNSUPPORTED();
++
++
++  std::string deviceUniqueId(deviceUniqueIdUTF8);
++  std::map<std::string, std::vector<VideoCaptureCapability>>::iterator it =
++      capabilitiesMap_.find(deviceUniqueId);
++  VideoCaptureCapabilities deviceCapabilities;
++
++  if (it != capabilitiesMap_.end()) {
++    deviceCapabilities = it->second;
++  }
++
++  for (VideoCaptureCapabilities::iterator it = deviceCapabilities.begin();
++       it != deviceCapabilities.end();
++       ++it) {
++    if (*it == requested) {
++      resulting = requested;
++      return 0;
++    }
++  }
++
++  VideoCaptureCapability best;
++
++  for (VideoCaptureCapabilities::iterator it = deviceCapabilities.begin();
++       it != deviceCapabilities.end();
++       ++it) {
++    if (((*it).codecType == requested.codecType || requested.codecType == kVideoCodecUnknown) &&
++        ((*it).rawType == requested.rawType || requested.rawType == kVideoUnknown) &&
++        (*it).width >= requested.width &&
++        (*it).height >= requested.height &&
++        (*it).maxFPS >= requested.maxFPS) {
++      resulting = *it;
++      return 0;
++    }
++  }
++
++  return -1;
+ }
+ 
+ int32_t DeviceInfoIos::DisplayCaptureSettingsDialogBox(
+@@ -108,5 +207,16 @@ int32_t DeviceInfoIos::GetOrientation(co
+ }
+ 
+ int32_t DeviceInfoIos::CreateCapabilityMap(const char* deviceUniqueIdUTF8) {
+-  IOS_UNSUPPORTED();
++
++  std::string deviceName(deviceUniqueIdUTF8);
++  std::map<std::string, std::vector<VideoCaptureCapability>>::iterator it =
++      capabilitiesMap_.find(deviceName);
++  VideoCaptureCapabilities deviceCapabilities;
++
++  if (it != capabilitiesMap_.end()) {
++    _captureCapabilities = it->second;
++    return 0;
++  }
++
++  return -1;
+ }
+Index: src/webrtc/modules/video_capture/ios/device_info_ios_objc.h
+===================================================================
+--- src.orig/webrtc/modules/video_capture/ios/device_info_ios_objc.h
++++ src/webrtc/modules/video_capture/ios/device_info_ios_objc.h
+@@ -13,6 +13,8 @@
+ 
+ #import <AVFoundation/AVFoundation.h>
+ 
++#import "webrtc/modules/video_capture/include/video_capture_defines.h"
++
+ @interface DeviceInfoIosObjC : NSObject
+ + (int)captureDeviceCount;
+ + (AVCaptureDevice*)captureDeviceForIndex:(int)index;
+@@ -20,6 +22,8 @@
+ + (NSString*)deviceNameForIndex:(int)index;
+ + (NSString*)deviceUniqueIdForIndex:(int)index;
+ + (NSString*)deviceNameForUniqueId:(NSString*)uniqueId;
+++ (webrtc::VideoCaptureCapability)capabilityForPreset:(NSString *)preset;
++
+ @end
+ 
+ #endif  // WEBRTC_MODULES_VIDEO_CAPTURE_IOS_DEVICE_INFO_IOS_OBJC_H_
+Index: src/webrtc/modules/video_capture/ios/device_info_ios_objc.mm
+===================================================================
+--- src.orig/webrtc/modules/video_capture/ios/device_info_ios_objc.mm
++++ src/webrtc/modules/video_capture/ios/device_info_ios_objc.mm
+@@ -15,6 +15,7 @@
+ #import <AVFoundation/AVFoundation.h>
+ 
+ #import "webrtc/modules/video_capture/ios/device_info_ios_objc.h"
++#import "webrtc/modules/video_capture/include/video_capture_defines.h"
+ 
+ @implementation DeviceInfoIosObjC
+ 
+@@ -50,4 +51,56 @@
+   return [[AVCaptureDevice deviceWithUniqueID:uniqueId] localizedName];
+ }
+ 
+++ (webrtc::VideoCaptureCapability)capabilityForPreset:(NSString *)preset
++{
++  webrtc::VideoCaptureCapability capability;
++
++  if ([preset isEqualToString:AVCaptureSessionPreset352x288]) {
++    capability.width = 352;
++    capability.height = 288;
++    capability.maxFPS = 30;
++    capability.expectedCaptureDelay = 333333;
++    capability.rawType = webrtc::kVideoNV12;
++    capability.codecType = webrtc::kVideoCodecUnknown;
++    capability.interlaced = false;
++  } else if ([preset isEqualToString:AVCaptureSessionPreset640x480]) {
++    capability.width = 640;
++    capability.height = 480;
++    capability.maxFPS = 30;
++    capability.expectedCaptureDelay = 333333;
++    capability.rawType = webrtc::kVideoNV12;
++    capability.codecType = webrtc::kVideoCodecUnknown;
++    capability.interlaced = false;
++  } else if ([preset isEqualToString:AVCaptureSessionPreset1280x720]) {
++    capability.width = 1280;
++    capability.height = 720;
++    capability.maxFPS = 30;
++    capability.expectedCaptureDelay = 333333;
++    capability.rawType = webrtc::kVideoNV12;
++    capability.codecType = webrtc::kVideoCodecUnknown;
++    capability.interlaced = false;
++  } else if ([preset isEqualToString:AVCaptureSessionPreset1920x1080]) {
++    capability.width = 1920;
++    capability.height = 1080;
++    capability.maxFPS = 30;
++    capability.expectedCaptureDelay = 333333;
++    capability.rawType = webrtc::kVideoNV12;
++    capability.codecType = webrtc::kVideoCodecUnknown;
++    capability.interlaced = false;
++  }
++//  else if ([preset isEqualToString:AVCaptureSessionPresetHigh]) {
++//    
++//  } else if ([preset isEqualToString:AVCaptureSessionPresetMedium]) {
++//    
++//  } else if ([preset isEqualToString:AVCaptureSessionPresetLow]) {
++//    
++//  } else if ([preset isEqualToString:AVCaptureSessionPresetiFrame960x540]) {
++//  
++//  } else if ([preset isEqualToString:AVCaptureSessionPresetiFrame1280x720]) {
++//    
++//  }
++
++  return capability;
++}
++
+ @end

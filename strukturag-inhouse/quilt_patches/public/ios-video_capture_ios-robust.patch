@@ -1,0 +1,23 @@
+Description: Minor fix for C++ class that doesn't automatically \
+  zeroing memory on init. \
+  Nillify capture_device_ in destruktor in case of data races.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/webrtc/modules/video_capture/ios/video_capture_ios.mm
+===================================================================
+--- src.orig/webrtc/modules/video_capture/ios/video_capture_ios.mm
++++ src/webrtc/modules/video_capture/ios/video_capture_ios.mm
+@@ -31,11 +31,13 @@ VideoCaptureIos::VideoCaptureIos(const i
+   capability_.width = kDefaultWidth;
+   capability_.height = kDefaultHeight;
+   capability_.maxFPS = kDefaultFrameRate;
++  capture_device_ = nil;
+ }
+ 
+ VideoCaptureIos::~VideoCaptureIos() {
+   if (is_capturing_) {
+     [capture_device_ stopCapture];
++    capture_device_ = nil;
+   }
+ }
+ 

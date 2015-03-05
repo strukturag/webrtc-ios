@@ -1,0 +1,39 @@
+Index: src/chromium/src/third_party/libjingle/source/talk/libjingle_examples.gyp
+===================================================================
+--- src.orig/chromium/src/third_party/libjingle/source/talk/libjingle_examples.gyp
++++ src/chromium/src/third_party/libjingle/source/talk/libjingle_examples.gyp
+@@ -304,7 +304,7 @@
+               ],
+             },
+             'libraries': [
+-              '$(SDKROOT)/usr/lib/libicucore.dylib',
++              '/usr/lib/libicucore.dylib',
+             ],
+           }
+         },  # target socketrocket
+Index: src/talk/libjingle_examples.gyp
+===================================================================
+--- src.orig/talk/libjingle_examples.gyp
++++ src/talk/libjingle_examples.gyp
+@@ -304,7 +304,7 @@
+               ],
+             },
+             'libraries': [
+-              '$(SDKROOT)/usr/lib/libicucore.dylib',
++              '/usr/lib/libicucore.dylib',
+             ],
+           }
+         },  # target socketrocket
+Index: src/chromium/src/third_party/sqlite/sqlite.gyp
+===================================================================
+--- src.orig/chromium/src/third_party/sqlite/sqlite.gyp
++++ src/chromium/src/third_party/sqlite/sqlite.gyp
+@@ -58,7 +58,7 @@
+               ],
+               'link_settings': {
+                 'libraries': [
+-                  '$(SDKROOT)/usr/lib/libsqlite3.dylib',
++                  '/usr/lib/libsqlite3.dylib',
+                 ],
+               },
+             }],

@@ -1,0 +1,16 @@
+Description: Do not retain VideoRenderIosView.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/webrtc/modules/video_render/ios/video_render_ios_channel.h
+===================================================================
+--- src.orig/webrtc/modules/video_render/ios/video_render_ios_channel.h
++++ src/webrtc/modules/video_render/ios/video_render_ios_channel.h
+@@ -36,7 +36,7 @@ class VideoRenderIosChannel : public Vid
+   bool RenderOffScreenBuffer();
+ 
+  private:
+-  VideoRenderIosView* view_;
++  __unsafe_unretained VideoRenderIosView* view_;
+   I420VideoFrame* current_frame_;
+   bool buffer_is_updated_;
+ };

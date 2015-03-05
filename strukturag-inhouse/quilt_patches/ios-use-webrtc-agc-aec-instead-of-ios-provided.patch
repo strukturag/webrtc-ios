@@ -1,0 +1,65 @@
+Description: We want to use WebRTC provided AGC and AEC instead of Apple's.
+Author: Yuriy Shevchuk <yuriy@struktur.de>
+
+Index: src/talk/media/webrtc/webrtcvoiceengine.cc
+===================================================================
+--- src.orig/talk/media/webrtc/webrtcvoiceengine.cc
++++ src/talk/media/webrtc/webrtcvoiceengine.cc
+@@ -790,9 +790,17 @@ bool WebRtcVoiceEngine::ApplyOptions(con
+   }
+ 
+ #if defined(IOS)
+-  // On iOS, VPIO provides built-in EC and AGC.
++  // Since we have overridden audio unit type from VPIO
++  // to RemoteIO we need EC and AGC from webrtc. Works only on armv7 now.
++#ifdef __aarch64__
+   options.echo_cancellation.Set(false);
+   options.auto_gain_control.Set(false);
++#else
++  options.echo_cancellation.Set(true);
++  options.auto_gain_control.Set(true);
++  ec_mode = webrtc::kEcAec;
++#endif
++
+ #elif defined(ANDROID)
+   ec_mode = webrtc::kEcAecm;
+ #endif
+@@ -800,7 +808,7 @@ bool WebRtcVoiceEngine::ApplyOptions(con
+ #if defined(IOS) || defined(ANDROID)
+   // Set the AGC mode for iOS as well despite disabling it above, to avoid
+   // unsupported configuration errors from webrtc.
+-  agc_mode = webrtc::kAgcFixedDigital;
++  agc_mode = webrtc::kAgcAdaptiveDigital;
+   options.typing_detection.Set(false);
+   options.experimental_agc.Set(false);
+   options.experimental_aec.Set(false);
+Index: src/webrtc/modules/audio_device/ios/audio_device_ios.mm
+===================================================================
+--- src.orig/webrtc/modules/audio_device/ios/audio_device_ios.mm
++++ src/webrtc/modules/audio_device/ios/audio_device_ios.mm
+@@ -1170,7 +1170,11 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+     AudioComponent comp;
+ 
+     desc.componentType = kAudioUnitType_Output;
++#ifdef __aarch64__
+     desc.componentSubType = kAudioUnitSubType_VoiceProcessingIO;
++#else
++    desc.componentSubType = kAudioUnitSubType_RemoteIO;
++#endif
+     desc.componentManufacturer = kAudioUnitManufacturer_Apple;
+     desc.componentFlags = 0;
+     desc.componentFlagsMask = 0;
+@@ -1202,8 +1206,13 @@ int32_t AudioDeviceIOS::InitPlayOrRecord
+                      "Could not set preferred sample rate: %s", errorString);
+     }
+     error = nil;
++#ifdef __aarch64__
+     [session setMode:AVAudioSessionModeVoiceChat
+                error:&error];
++#else
++    [session setMode:AVAudioSessionModeDefault
++               error:&error];
++#endif
+     if (error != nil) {
+         const char* errorString = [[error localizedDescription] UTF8String];
+         WEBRTC_TRACE(kTraceInfo, kTraceAudioDevice, _id,
